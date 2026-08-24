@@ -35,10 +35,20 @@
   }
   #hud {
     display: flex;
+    align-items: center;
     gap: 24px;
     font-size: 1rem;
   }
   #hud span { color: var(--accent); font-weight: 600; }
+  #sound-btn {
+    background: transparent;
+    border: 1px solid #334155;
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 0.95rem;
+    border-radius: 6px;
+  }
+  #sound-btn:hover { filter: none; border-color: var(--accent); }
   #board {
     background: var(--board);
     border-radius: 8px;
@@ -94,9 +104,11 @@
   <div id="hud">
     <div>Score: <span id="score">0</span></div>
     <div>Best: <span id="best">0</span></div>
+    <div>Level: <span id="level">1</span></div>
+    <button id="sound-btn" aria-label="Toggle sound">&#128266;</button>
   </div>
   <canvas id="board" width="400" height="400"></canvas>
-  <p id="hint">Arrow keys / WASD to move. Space to pause. Eat the red food, avoid walls and yourself.</p>
+  <p id="hint">Arrow keys / WASD to move, or swipe on the board. Space to pause. Speed increases every 5 food. Eat the red food, avoid walls and yourself.</p>
   <div id="touch-controls">
     <button class="tc-up" data-dir="up">&#8593;</button>
     <button class="tc-left" data-dir="left">&#8592;</button>
@@ -116,6 +128,8 @@
   const ctx = canvas.getContext('2d');
   const scoreEl = document.getElementById('score');
   const bestEl = document.getElementById('best');
+  const levelEl = document.getElementById('level');
+  const soundBtn = document.getElementById('sound-btn');
   const overlay = document.getElementById('overlay');
   const overlayTitle = document.getElementById('overlay-title');
   const overlayScore = document.getElementById('overlay-score');
@@ -125,11 +139,40 @@
   const COLS = canvas.width / CELL;
   const ROWS = canvas.height / CELL;
   const BASE_SPEED_MS = 130;
+  const MIN_SPEED_MS = 60;
+  const SPEED_STEP_MS = 8;
+  const FOODS_PER_LEVEL = 5;
 
-  let snake, dir, nextDir, food, score, best, gameOver, paused, loopHandle;
+  let snake, dir, nextDir, food, score, best, level, foodsEaten, gameOver, paused, loopHandle, speed;
+  let soundOn = localStorage.getItem('snake-sound') !== 'off';
 
   best = Number(localStorage.getItem('snake-best') || 0);
   bestEl.textContent = best;
+  soundBtn.textContent = soundOn ? '\u{1F50A}' : '\u{1F507}';
+
+  let audioCtx;
+  function beep(freq, durationMs, type = 'square') {
+    if (!soundOn) return;
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      gain.gain.value = 0.08;
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + durationMs / 1000);
+      osc.stop(audioCtx.currentTime + durationMs / 1000);
+    } catch (e) { /* audio unavailable */ }
+  }
+
+  soundBtn.addEventListener('click', () => {
+    soundOn = !soundOn;
+    localStorage.setItem('snake-sound', soundOn ? 'on' : 'off');
+    soundBtn.textContent = soundOn ? '\u{1F50A}' : '\u{1F507}';
+  });
 
   function randCell() {
     return {
@@ -155,13 +198,22 @@
     dir = { x: 1, y: 0 };
     nextDir = dir;
     score = 0;
+    level = 1;
+    foodsEaten = 0;
+    speed = BASE_SPEED_MS;
     gameOver = false;
     paused = false;
     scoreEl.textContent = score;
+    levelEl.textContent = level;
     placeFood();
     overlay.classList.remove('show');
     if (loopHandle) clearInterval(loopHandle);
-    loopHandle = setInterval(tick, BASE_SPEED_MS);
+    loopHandle = setInterval(tick, speed);
+  }
+
+  function restartLoop() {
+    clearInterval(loopHandle);
+    loopHandle = setInterval(tick, speed);
   }
 
   function setDir(x, y) {
@@ -198,6 +250,25 @@
     setDir(x, y);
   });
 
+  let touchStart = null;
+  canvas.addEventListener('touchstart', (e) => {
+    const t = e.changedTouches[0];
+    touchStart = { x: t.clientX, y: t.clientY };
+  }, { passive: true });
+  canvas.addEventListener('touchend', (e) => {
+    if (!touchStart) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchStart.x;
+    const dy = t.clientY - touchStart.y;
+    touchStart = null;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      setDir(dx > 0 ? 1 : -1, 0);
+    } else {
+      setDir(0, dy > 0 ? 1 : -1);
+    }
+  }, { passive: true });
+
   function togglePause() {
     paused = !paused;
   }
@@ -215,6 +286,7 @@
       head.y < 0 || head.y >= ROWS ||
       snake.some(s => s.x === head.x && s.y === head.y)
     ) {
+      beep(110, 300, 'sawtooth');
       endGame();
       return;
     }
@@ -223,8 +295,18 @@
 
     if (head.x === food.x && head.y === food.y) {
       score += 10;
+      foodsEaten++;
       scoreEl.textContent = score;
+      beep(660, 80);
       placeFood();
+
+      if (foodsEaten % FOODS_PER_LEVEL === 0 && speed > MIN_SPEED_MS) {
+        level++;
+        levelEl.textContent = level;
+        speed = Math.max(MIN_SPEED_MS, speed - SPEED_STEP_MS);
+        restartLoop();
+        beep(880, 150);
+      }
     } else {
       snake.pop();
     }
@@ -241,7 +323,7 @@
       bestEl.textContent = best;
     }
     overlayTitle.textContent = 'Game Over';
-    overlayScore.textContent = `Score: ${score}  •  Best: ${best}`;
+    overlayScore.textContent = `Score: ${score}  •  Level: ${level}  •  Best: ${best}`;
     overlay.classList.add('show');
     draw();
   }
